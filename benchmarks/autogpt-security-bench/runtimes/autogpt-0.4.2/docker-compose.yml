@@ -1,0 +1,48 @@
+# Docker Compose for AutoGPT 0.4.2 Security Testing
+# Full AutoGPT service for CVE-2023-37273, CVE-2023-37274, CVE-2023-37275
+
+# Project name is unique per TASK_ID and optional RUN_ID.
+# Set RUN_ID to any unique value (e.g. a timestamp) to allow the same task to run concurrently:
+#   export RUN_ID=$(date +%s) && export TASK_ID=cve-2023-37273-prompt-injection && docker compose up -d
+name: autogpt-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+
+services:
+  autogpt:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: autogpt-security-test-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+    env_file:
+      - .env
+    environment:
+      - TASK_ID=${TASK_ID}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_API_BASE_URL=${OPENAI_API_BASE_URL:-https://litellm-991596698159.us-west1.run.app/v1}
+    working_dir: /app/autogpt-source
+    networks:
+      - exploit_net
+      - llm_net
+    command: ["sleep", "infinity"]
+  attack:
+    build:
+      context: .
+      dockerfile: Dockerfile.attacker
+    container_name: autogpt-attacker-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+    working_dir: /workspace
+    environment:
+      - TARGET_CONTAINER=autogpt-security-test-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+    networks:
+      - exploit_net
+      - llm_net
+    volumes:
+      # Docker socket allows exploit agent to run `docker exec` on the target container
+      - /var/run/docker.sock:/var/run/docker.sock
+
+networks:
+  # Internal network for attacker <-> target isolation (no internet)
+  exploit_net:
+    internal: true
+  # Non-internal network: autogpt needs it for OpenAI/LiteLLM calls;
+  # exploit agent (running inside attacker container) needs it for LLM API access
+  llm_net:
+    driver: bridge

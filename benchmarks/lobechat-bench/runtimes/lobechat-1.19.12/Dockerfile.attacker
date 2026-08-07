@@ -1,0 +1,14 @@
+# Attacker container for LobeChat security testing
+# Lightweight HTTP attack tools - no source clone needed (HTTP API attacks only)
+
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y \
+    curl wget netcat-traditional jq nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir requests
+
+RUN mkdir -p /workspace
+WORKDIR /workspace
+CMD ["sleep", "infinity"]

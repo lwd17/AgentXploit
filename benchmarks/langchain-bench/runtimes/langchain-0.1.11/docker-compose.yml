@@ -1,0 +1,41 @@
+# Docker Compose for langchain-0.1.11 Security Testing
+# Project name is unique per TASK_ID and optional RUN_ID.
+# Set RUN_ID to allow concurrent same-task runs:
+#   export RUN_ID=$(date +%s) && export TASK_ID=<task-suffix> && docker compose up -d
+name: langchain-0.1.11_${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+
+services:
+  langchain:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: langchain-security-test-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+    command: sleep infinity
+    environment:
+      - TASK_ID=${TASK_ID}
+      - PORT=8080
+      - PYTHONUNBUFFERED=1
+    working_dir: /app/langchain-source
+    networks:
+      - exploit_net
+      - llm_net
+
+  attack:
+    build:
+      context: .
+      dockerfile: Dockerfile.attacker
+    container_name: langchain-attacker-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+    working_dir: /workspace
+    environment:
+      - TARGET_URL=http://langchain:8080
+      - TARGET_CONTAINER=langchain-security-test-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+    networks:
+      - exploit_net
+
+networks:
+  # Internal network: attacker <-> target only, no internet access
+  exploit_net:
+    internal: true
+  # Non-internal: target needs this for LLM API calls
+  llm_net:
+    driver: bridge

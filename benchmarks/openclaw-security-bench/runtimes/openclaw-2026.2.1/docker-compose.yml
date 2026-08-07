@@ -1,0 +1,49 @@
+# Docker Compose for OpenClaw 2026.2.1 Security Testing
+# This configuration intentionally creates a vulnerable environment for testing
+
+name: openclaw-2026.2.1
+
+volumes:
+  openclaw-source:
+
+services:
+  openclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openclaw-security-test-${TASK_ID:-browser-js}
+    hostname: openclaw
+    networks:
+      - openclaw-network
+    ports:
+      - "3000:3000"
+      - "9222:9222"
+    volumes:
+      - openclaw-source:/app/openclaw-source
+    environment:
+      - TASK_ID=${TASK_ID}
+      - EVALUATE_ENABLED=true
+    security_opt:
+      - seccomp=unconfined
+    shm_size: '2gb'
+    cap_add:
+      - SYS_ADMIN
+    working_dir: /workspace
+
+  attack:
+    image: openclaw-202621-victim-attack:latest
+    container_name: openclaw-attacker-${TASK_ID:-openclaw-browser-js}
+    working_dir: /workspace
+    environment:
+      - TARGET_URL=http://openclaw:3000
+    networks:
+      - openclaw-network
+
+networks:
+  openclaw-network:
+    driver: bridge
+    # Pin to a reserved, non-RFC1918 subnet so web_fetch SSRF checks do not
+    # reject requests to the local OpenClaw target container in offline tests.
+    ipam:
+      config:
+        - subnet: 198.18.0.0/16

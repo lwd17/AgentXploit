@@ -1,0 +1,86 @@
+# Environment files with sensitive API keys and credentials
+AutoGPT/.env
+gpt-researcher/.env
+OpenHands/config.toml
+
+# AutoGPT versions
+AutoGPT_0.4.2/.env
+AutoGPT_0.4.2/.envrc
+AutoGPT_0.5.0/autogpts/autogpt/.env
+AutoGPT_0.5.0/autogpts/autogpt/.envrc
+AutoGPT_0.5.0/autogpts/forge/.env
+AutoGPT_0.5.0/benchmark/.env
+
+# Devika
+devika/.env
+
+# Khoj
+khoj/.env
+khoj/config.toml
+
+# Keep template files - these should be committed
+!AutoGPT/.env.template
+!gpt-researcher/.env.example
+!OpenHands/config.template.toml
+!**/.env.example
+!**/.env.template
+!**/.env.sample
+
+# General patterns for sensitive files
+.env
+*.env
+*.env.local
+.env.local
+secrets.yaml
+secrets.yml
+credentials.json
+**/config.toml
+!**/config.template.toml
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+ragflow_0.10.0/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.installed.cfg
+
+# Virtual environments
+.venv/
+venv/
+env/
+.python-version
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+analysis_agent.log
+exploiter_agent.log
+
+# Agent runtime outputs (generated during runs)
+src/analysis_agent/reports/
+src/exploiter_agent/reports/
+src/exploiter_agent/codex_reports/
+src/analysis_agent/codex_part/reports/
+src/analysis_agent/legacy_docs/
+src/exploiter_agent/legacy_docs/

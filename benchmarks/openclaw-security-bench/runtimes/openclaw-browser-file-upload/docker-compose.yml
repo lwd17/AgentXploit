@@ -1,0 +1,48 @@
+# Docker Compose for OpenClaw Browser File Upload Arbitrary File Read Testing
+
+name: openclaw-browser-file-upload
+
+volumes:
+  openclaw-source-file-upload:
+
+services:
+  openclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openclaw-security-test-${TASK_ID:-browser-file-upload}
+    hostname: openclaw
+    environment:
+      - TASK_ID=${TASK_ID}
+      - OPENCLAW_HOME=/root/.openclaw
+      - NODE_ENV=production
+    volumes:
+      - openclaw-source-file-upload:/app/openclaw-source
+    working_dir: /workspace
+    ports:
+      - "${HOST_PORT:-18789}:18789"
+      - "18790:18790"  # Health check port
+    networks:
+      - openclaw-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:18790/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    # Add security options to allow process inspection
+    cap_add:
+      - SYS_PTRACE
+
+  attack:
+    image: openclaw-browser-file-upload-attack:latest
+    container_name: openclaw-attacker-${TASK_ID:-browser-file-upload}
+    working_dir: /workspace
+    environment:
+      - TARGET_URL=http://openclaw:18789
+    networks:
+      - openclaw-network
+
+networks:
+  openclaw-network:
+    driver: bridge

@@ -1,0 +1,28 @@
+# Attacker container for AutoGPT 0.4.2 security testing
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y \
+    curl \
+    wget \
+    jq \
+    git \
+    netcat-openbsd \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install docker CLI (client only, connects to host via mounted socket)
+RUN curl -fsSL https://download.docker.com/linux/static/stable/x86_64/docker-27.5.1.tgz \
+    | tar xz --strip-components=1 -C /usr/local/bin docker/docker
+
+RUN pip install requests httpx
+
+# prepare source code
+WORKDIR /app
+RUN git clone -b v0.4.2 --depth 1 https://github.com/Significant-Gravitas/Auto-GPT autogpt-source && \
+    cd autogpt-source && \
+    git checkout v0.4.2 && \
+    rm -rf .git
+
+WORKDIR /workspace
+
+CMD ["sleep", "infinity"]

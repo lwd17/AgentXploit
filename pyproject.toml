@@ -1,0 +1,75 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentxploit"
+version = "1.0.0"
+description = "Advanced AI security research and exploit agent using Google ADK"
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.12"
+authors = [
+    { name = "Shi Qiu", email = "stephenqius@gmail.com" },
+    { name = "Zhun Wang", email = "zhun.wang@berkeley.edu" }
+]
+dependencies = [
+    "google-adk==1.0.0",
+    "litellm==1.74.3",
+    "python-dotenv==1.1.1",
+    "requests>=2.25.0",
+    "pathlib2>=2.3.0",
+    "asyncio>=3.4.3",
+    "deprecated>=1.3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.4.1",
+    "pytest-asyncio==1.1.0",
+    "pytest-cov==6.1.0",
+    "ruff==0.12.4",
+    "mypy==1.17.0",
+]
+
+[project.scripts]
+agentxploit = "AgentXploit.cli:main"
+analysis-agent = "analysis_agent.cli:main"
+exploiter-agent = "exploiter_agent.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/StephenQSstarThomas/AgentXploit"
+Repository = "https://github.com/StephenQSstarThomas/AgentXploit"
+Issues = "https://github.com/StephenQSstarThomas/AgentXploit/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+AgentXploit = ["py.typed"]
+
+[tool.ruff]
+select = ["E", "F", "B", "I", "N", "UP", "S", "A", "C4", "DTZ", "T10", "ISC"]
+ignore = ["E501"]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint.isort]
+known-first-party = ["AgentXploit"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+strict_equality = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+asyncio_mode = "auto"

@@ -1,0 +1,34 @@
+# Docker Compose for LobeChat 0.162.13 Security Testing
+# Full LobeChat service for CVE-2024-37895 (API Key Leak via Custom Base URL)
+
+include:
+  - ../../../attack-scripts/lobechat-0.162.13/compose.yml
+
+volumes:
+  lobechat-source-0162:
+
+services:
+  lobechat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lobechat-security-test-${TASK_ID:-default}
+    environment:
+      - TASK_ID=${TASK_ID}
+      - PORT=3210
+      - NODE_ENV=development
+      # Set a real API key that will be leaked (for testing purposes)
+      - OPENAI_API_KEY=sk-test-secret-api-key-12345-LEAKED
+    volumes:
+      - lobechat-source-0162:/app/lobechat-source
+    working_dir: /app/lobechat-source
+    ports:
+      - "${HOST_PORT:-3210}:3210"
+    networks:
+      - exploit_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3210"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s

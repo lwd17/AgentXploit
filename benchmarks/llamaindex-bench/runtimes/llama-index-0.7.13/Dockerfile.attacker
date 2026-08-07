@@ -1,0 +1,18 @@
+# Attacker container for llama-index-0.7.13 security testing
+# Source code cloned at build time (no shared volume with target)
+
+FROM python:3.9-slim
+
+RUN apt-get update && apt-get install -y \
+    curl wget jq netcat-openbsd git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir requests httpx Flask sseclient-py
+
+# Clone llama-index source for reference (no .git)
+RUN git clone --depth 1 --branch v0.7.13 https://github.com/jerryjliu/llama_index.git /app/llama-index-source && \
+    rm -rf /app/llama-index-source/.git
+
+RUN mkdir -p /workspace
+WORKDIR /workspace
+CMD ["sleep", "infinity"]

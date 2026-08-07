@@ -1,0 +1,27 @@
+# Attacker container for gpt_academic 3.9.0 security testing
+# Source code is cloned independently (not shared with victim via volume)
+FROM python:3.11-slim
+
+RUN apt-get update && apt-get install -y \
+    curl \
+    wget \
+    netcat-traditional \
+    jq \
+    git \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir \
+    requests \
+    beautifulsoup4 \
+    lxml
+
+# Clone gpt_academic source for vulnerability analysis (independent copy, .git removed)
+RUN git clone https://github.com/binary-husky/gpt_academic.git /app/gpt_academic-source && \
+    cd /app/gpt_academic-source && \
+    git checkout version3.90 && \
+    rm -rf /app/gpt_academic-source/.git
+
+WORKDIR /workspace
+
+CMD ["sleep", "infinity"]

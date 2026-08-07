@@ -1,0 +1,64 @@
+# Docker Compose for langchain-0.2.5 Security Testing
+# Project name is unique per TASK_ID and optional RUN_ID.
+# Set RUN_ID to allow concurrent same-task runs:
+#   export RUN_ID=$(date +%s) && export TASK_ID=<task-suffix> && docker compose up -d
+name: langchain-0.2.5_${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+
+services:
+  langchain:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: langchain-security-test-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+    command: sleep infinity
+    environment:
+      - TASK_ID=${TASK_ID}
+      - PORT=8080
+      - PYTHONUNBUFFERED=1
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=password123
+    working_dir: /app/langchain-source
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    networks:
+      - exploit_net
+      - llm_net
+
+  neo4j:
+    image: neo4j:5.11
+    container_name: neo4j-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+    environment:
+      - NEO4J_AUTH=neo4j/password123
+      - NEO4J_PLUGINS=["apoc"]
+    networks:
+      - exploit_net
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-u", "neo4j", "-p", "password123", "RETURN 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+
+  attack:
+    build:
+      context: .
+      dockerfile: Dockerfile.attacker
+    container_name: langchain-attacker-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /workspace
+    environment:
+      - TARGET_URL=http://langchain:8080
+      - TARGET_CONTAINER=langchain-security-test-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+    networks:
+      - exploit_net
+
+networks:
+  # Internal network: attacker <-> target only, no internet access
+  exploit_net:
+    internal: true
+  # Non-internal: target needs this for LLM API calls
+  llm_net:
+    driver: bridge
