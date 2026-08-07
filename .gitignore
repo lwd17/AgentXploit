@@ -84,3 +84,8 @@ src/exploiter_agent/codex_reports/
 src/analysis_agent/codex_part/reports/
 src/analysis_agent/legacy_docs/
 src/exploiter_agent/legacy_docs/
+
+# Baseline / experiment result outputs
+**/claude_reports/
+codex_baseline/stealthiness_results.json
+codex_baseline/stealthiness_waf_results.json
