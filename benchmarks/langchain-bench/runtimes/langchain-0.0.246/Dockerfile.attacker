@@ -1,0 +1,18 @@
+# Attacker container for langchain-0.0.246 security testing
+# Source code cloned at build time (no shared volume with target)
+
+FROM python:3.9-slim
+
+RUN apt-get update && apt-get install -y \
+    curl wget jq netcat-openbsd git docker.io \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir requests httpx
+
+# Clone LangChain source for reference (no .git)
+RUN git clone --depth 1 --branch v0.0.245 https://github.com/hwchase17/langchain.git /app/langchain-source && \
+    rm -rf /app/langchain-source/.git
+
+RUN mkdir -p /workspace
+WORKDIR /workspace
+CMD ["sleep", "infinity"]

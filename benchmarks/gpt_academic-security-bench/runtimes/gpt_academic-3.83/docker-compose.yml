@@ -1,0 +1,45 @@
+# Docker Compose for gpt_academic 3.83 Security Testing
+# Multiple CVEs (see tasks/)
+#
+# Project name is unique per TASK_ID and optional RUN_ID.
+# Set RUN_ID to allow the same task to run concurrently:
+#   export RUN_ID=$(date +%s) && export TASK_ID=cve-2024-10100-lfi-path-traversal && docker compose up -d
+name: gpt-academic-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+
+services:
+  gpt_academic:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gpt_academic-security-test-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+    command: sleep infinity
+    environment:
+      - TASK_ID=${TASK_ID}
+      - WEB_PORT=8080
+    working_dir: /app/gpt_academic-source
+    networks:
+      - exploit_net
+      - llm_net
+
+  attack:
+    build:
+      context: .
+      dockerfile: Dockerfile.attacker
+    container_name: gpt_academic-attacker-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+    working_dir: /workspace
+    environment:
+      - TARGET_URL=http://gpt_academic-security-test-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}:8080
+      - TARGET_CONTAINER=gpt_academic-security-test-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - exploit_net
+
+networks:
+  # Internal network: attacker <-> target only, no internet access
+  exploit_net:
+    internal: true
+
+  # Non-internal: target needs this for LLM API calls
+  llm_net:
+    driver: bridge

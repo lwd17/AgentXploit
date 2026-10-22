@@ -1,0 +1,42 @@
+# Docker Compose for OpenClaw 2026.1.30 Security Testing
+# Vulnerable to message tool filePath sandbox bypass (CVE-OPENCLAW-2026-001)
+# This configuration intentionally creates a vulnerable environment for security research
+
+name: openclaw-2026.1.30
+
+volumes:
+  openclaw-source:
+  host-secrets:
+
+services:
+  openclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openclaw-security-test-${TASK_ID:-message-filePath}
+    hostname: openclaw
+    networks:
+      - openclaw-network
+    ports:
+      - "3000:3000"
+    volumes:
+      - openclaw-source:/app/openclaw-source
+      - host-secrets:/host_secrets
+    environment:
+      - TASK_ID=${TASK_ID}
+      - SANDBOX_ROOT=/sandbox
+      - SANDBOX_MODE=non-main
+    working_dir: /workspace
+
+  attack:
+    image: openclaw-2026130-victim-attack:latest
+    container_name: openclaw-attacker-${TASK_ID:-message-filePath}
+    working_dir: /workspace
+    environment:
+      - TARGET_URL=http://openclaw:3000
+    networks:
+      - openclaw-network
+
+networks:
+  openclaw-network:
+    driver: bridge

@@ -1,0 +1,41 @@
+# Docker Compose for MetaGPT 0.6.4 Security Testing
+# CVE-2024-23750: Arbitrary Code Execution in RunCode.run_script()
+#
+# Project name is unique per TASK_ID and optional RUN_ID.
+# Set RUN_ID to allow concurrent same-task runs:
+#   export RUN_ID=$(date +%s) && export TASK_ID=cve-2024-23750-rce-runcode && docker compose up -d
+name: metagpt-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+
+services:
+  metagpt:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: metagpt-security-test-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+    command: sleep infinity
+    environment:
+      - TASK_ID=${TASK_ID}
+    working_dir: /app/metagpt-source
+    networks:
+      - exploit_net
+      - llm_net
+
+  attack:
+    build:
+      context: .
+      dockerfile: Dockerfile.attacker
+    container_name: metagpt-attacker-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+    working_dir: /workspace
+    environment:
+      - TARGET_URL=http://metagpt:8080
+      - TARGET_CONTAINER=metagpt-security-test-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+    networks:
+      - exploit_net
+
+networks:
+  # Internal network: attacker <-> target only, no internet access
+  exploit_net:
+    internal: true
+  # Non-internal: target needs this for LLM API calls
+  llm_net:
+    driver: bridge

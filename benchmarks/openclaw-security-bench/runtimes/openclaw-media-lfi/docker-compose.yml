@@ -1,0 +1,43 @@
+# Docker Compose for OpenClaw MEDIA Path LFI (CVE-2026-25475) Testing
+
+name: openclaw-media-lfi
+
+volumes:
+  openclaw-source-media-lfi:
+
+services:
+  openclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openclaw-security-test-${TASK_ID:-media-lfi}
+    hostname: openclaw
+    environment:
+      - TASK_ID=${TASK_ID}
+      - NODE_ENV=production
+    volumes:
+      - openclaw-source-media-lfi:/app/openclaw-source
+    working_dir: /workspace
+    ports:
+      - "${HOST_PORT:-18792}:18792"
+    networks:
+      - openclaw-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  attack:
+    image: openclaw-media-lfi-attack:latest
+    container_name: openclaw-attacker-${TASK_ID:-media-lfi}
+    working_dir: /workspace
+    environment:
+      - TARGET_URL=http://openclaw:18792
+    networks:
+      - openclaw-network
+
+networks:
+  openclaw-network:
+    driver: bridge

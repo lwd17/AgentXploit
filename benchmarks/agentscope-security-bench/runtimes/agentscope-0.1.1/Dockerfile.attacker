@@ -1,0 +1,21 @@
+# Attacker container for AgentScope 0.1.1 security testing
+# Source code is cloned at build time; .git is removed (no shared volume with target)
+
+FROM python:3.9-slim
+
+# Install tools
+RUN apt-get update && apt-get install -y \
+    curl wget netcat-traditional jq git \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir requests beautifulsoup4 lxml
+
+# Clone AgentScope 0.1.1 source for reference (no .git)
+RUN git clone https://github.com/modelscope/agentscope.git /app/agentscope-source && \
+    cd /app/agentscope-source && \
+    git checkout v0.1.1 && \
+    rm -rf .git
+
+RUN mkdir -p /workspace
+WORKDIR /workspace
+CMD ["sleep", "infinity"]

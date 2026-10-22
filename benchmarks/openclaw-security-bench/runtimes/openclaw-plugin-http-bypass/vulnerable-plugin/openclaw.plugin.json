@@ -1,0 +1,14 @@
+{
+  "id": "vulnerable-admin-api",
+  "name": "Vulnerable Admin API",
+  "version": "1.0.0",
+  "description": "Demonstrates authentication bypass vulnerability in plugin HTTP routes",
+  "main": "index.ts",
+  "author": "Security Research",
+  "license": "MIT",
+  "configSchema": {
+    "type": "object",
+    "properties": {},
+    "additionalProperties": false
+  }
+}

@@ -1,0 +1,53 @@
+# Docker Compose for LobeChat 0.122.3 Security Testing
+# Full LobeChat service for CVE-2024-24566 (Plugin Authentication Bypass)
+
+name: lobechat-${TASK_ID:-default}
+
+volumes:
+  lobechat-source-0122:
+
+services:
+  lobechat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lobechat-security-test-${TASK_ID:-default}
+    environment:
+      - TASK_ID=${TASK_ID}
+      - PORT=3210
+      - NODE_ENV=development
+      - ACCESS_CODE=TEST123
+    volumes:
+      - lobechat-source-0122:/app/lobechat-source
+    working_dir: /app/lobechat-source
+    ports:
+      - "${HOST_PORT:-3210}:3210"
+    networks:
+      - exploit_net
+      - llm_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3210"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+
+  attack:
+    build:
+      context: .
+      dockerfile: Dockerfile.attacker
+    container_name: lobechat-attacker-${TASK_ID:-default}
+    working_dir: /workspace
+    environment:
+      - TARGET_URL=http://lobechat-security-test-${TASK_ID:-default}:3210
+      - TARGET_CONTAINER=lobechat-security-test-${TASK_ID:-default}
+    networks:
+      - exploit_net
+
+networks:
+  # Internal network: attacker <-> target only, no internet access
+  exploit_net:
+    internal: true
+  # Non-internal: target needs this for LLM API calls
+  llm_net:
+    driver: bridge

@@ -1,0 +1,50 @@
+# Environment files
+.env
+*.env
+!.env.template
+
+# Runtime state
+runtimes/*/workspace/
+runtimes/*/logs/
+runtimes/*/data/
+runtimes/*/auto_gpt_workspace/
+
+# Docker artifacts
+*.log
+.docker/
+docker-compose.yml.backup
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+*.py[cod]
+*$py.class
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+.Trash-*/
+
+# Test results
+test-results/
+*.result
+results/
+
+# Temporary files
+*.tmp
+*.temp
+/tmp/
+
+# Generated files
+EXPLOIT_PROOF.txt
+pwned.txt

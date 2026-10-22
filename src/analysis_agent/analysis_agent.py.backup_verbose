@@ -1,0 +1,967 @@
+import os
+import logging
+import json
+import uuid
+import time
+
+import yaml
+from dotenv import load_dotenv
+from google.adk.agents import LlmAgent
+from google.adk.models.lite_llm import LiteLlm
+from google.adk.runners import InMemoryRunner
+from google.genai.types import UserContent
+from google.adk.tools import FunctionTool
+
+# Import custom tools
+from tools.todo_manager import (
+    todo_write, todo_read, todo_update, todo_add, todo_complete
+)
+from tools.code_reader import (
+    read_code, list_directory, search_code,
+    extract_imports, read_code_with_references
+)
+from tools.docker_executor import execute_docker_command
+from tools.report_writer import write_report
+from tools.tool_extractor import extract_tool_info, extract_dataflow, extract_vulnerabilities
+from tools.session_manager import start_analysis_session, end_analysis_session
+from tools.incremental_writer import (
+    save_tool_analysis, log_analysis_event, save_environment_info,
+    get_incremental_analysis_summary
+)
+
+load_dotenv()
+
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.FileHandler("analysis_agent.log"), logging.StreamHandler()],
+)
+logger = logging.getLogger(__name__)
+
+
+class AnalysisAgent:
+    """Analysis agent for understanding target agent architecture and data flows."""
+
+    def __init__(self, target_path: str, container_name: str = None, config_path: str = "config.yaml"):
+        """Initialize analysis agent.
+
+        Args:
+            target_path: Path to target agent codebase (local or container path)
+            container_name: Docker container name if target is containerized
+            config_path: Path to configuration file
+        """
+        self.target_path = target_path
+        self.container_name = container_name
+        self.config_path = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), config_path)
+        )
+        self.config = self._load_config(self.config_path) if os.path.exists(self.config_path) else {}
+
+        self.session_history = {
+            "session_id": str(uuid.uuid4()),
+            "target_path": target_path,
+            "container_name": container_name,
+            "findings": [],
+            "timestamp": time.strftime("%Y%m%d_%H%M%S")
+        }
+
+        self.agent = self._build_adk_agent()
+
+    def _load_config(self, config_path: str) -> dict:
+        """Load configuration from YAML file."""
+        try:
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+            logger.info(f"Configuration loaded from {config_path}")
+            return config or {}
+        except Exception as e:
+            logger.warning(f"Failed to load config: {e}")
+            return {}
+
+    def _build_system_prompt(self) -> str:
+        """Build system prompt for analysis agent."""
+        target_type = "Docker Container" if self.container_name else "Local Filesystem"
+        container_info = f"Container: {self.container_name}" if self.container_name else f"Path: {self.target_path}"
+
+        prompt = f"""You are a security analysis agent that analyzes agent codebases.
+
+TARGET: {target_type} - {container_info}
+
+=== TASK ===
+
+Perform complete security analysis of the target agent:
+
+1. **Agent Tools** - Detailed categorization of all tools the agent can use, such as:
+   - File execution/read/write tools
+   - Bash command execution tools
+   - Web browsing tools
+   - Report generation tools
+   - Database access tools
+   - API call tools
+   - Other tools
+
+2. **Agent Dataflows** - Map how data flows through the system:
+   - Where data comes from (user input, web, files, etc.)
+   - How it's transformed
+   - Where it goes (LLM prompts, bash commands, file writes, etc.)
+   - Whether sanitization is applied
+
+3. **Agent Vulnerabilities** - Identify security issues:
+   - Prompt injection vulnerabilities (web→agent without sanitization)
+   - Command injection (user input→bash without validation)
+   - Path traversal (unsanitized file paths)
+   - Other security risks
+
+4. **Agent Environment** - Document deployment requirements:
+   - Docker requirements
+   - Runtime dependencies
+   - Required packages
+
+=== AVAILABLE TOOLS ===
+
+**Code Reading Tools (LOCAL FILESYSTEM):**
+
+1. read_code(file_path, max_lines=None, line_offset=None)
+   - Read source code files from LOCAL filesystem
+   - Returns: file content, line counts, truncation status
+   - Example: read_code("/path/to/agent.py")
+
+2. read_code_with_references(file_path, include_imports=True, max_lines=None)
+   - **ENHANCED**: Read code AND extract cross-file references automatically
+   - Analyzes imports and suggests related files to explore
+   - Returns: content + imports + suggested_files
+   - **USE THIS** when you want to understand file dependencies
+
+3. extract_imports(file_path)
+   - Extract import statements from a code file
+   - Detects language and resolves import paths
+   - Returns: imports list + suggested_files to explore
+   - Supports Python, JavaScript/TypeScript, Go, Java
+
+4. list_directory(dir_path, recursive=False, pattern=None)
+   - Explore LOCAL directory structure
+   - Use recursive=True to find all files
+   - Use pattern="*.py" to filter specific file types
+   - Returns: files and directories list
+
+5. search_code(search_pattern, search_path, file_pattern=None, max_results=50)
+   - Search for patterns in LOCAL code (grep-based)
+   - Useful for finding function definitions, imports, etc.
+   - Returns: list of matches with file, line number, and text
+
+**Docker Container Tools:**
+
+6. execute_docker_command(container_name, command, timeout=30)
+   - Execute arbitrary shell commands in Docker container
+   - **YOU construct the command** (cat, ls, grep, find, etc.)
+   - Returns: exit_code, stdout, stderr
+   - Examples:
+     * Read file: execute_docker_command("{self.container_name or 'container'}", "cat /app/agent.py")
+     * List files: execute_docker_command("{self.container_name or 'container'}", "ls -la /app")
+     * Search: execute_docker_command("{self.container_name or 'container'}", "grep -rn 'def.*tool' /app")
+     * Find files: execute_docker_command("{self.container_name or 'container'}", "find /app -name '*.py'")
+   - **USE THIS** for all Docker container access
+
+**Session Management:**
+
+4. start_analysis_session(agent_name)
+   - **CRITICAL: Call this FIRST** before analyzing any tools
+   - Creates a new analysis session for the target agent
+   - All tools analyzed in this session will be written to the same report file
+   - Returns: session info with session_id
+   - **Example**: start_analysis_session("gpt-researcher")
+
+5. end_analysis_session(session_id)
+   - **Call this LAST** after analyzing all tools
+   - Ends the current analysis session
+   - Returns: summary with tools_count and report_path
+
+**Tool Analysis (Sequential Workflow - RECOMMENDED):**
+
+For each discovered tool, follow this 3-round sequential analysis:
+
+6. **ROUND 1: extract_tool_info(tool_name, code_snippet, position)**
+   - Returns an analysis framework with `analysis_prompt`
+   - **YOU** analyze the code according to the prompt
+   - Return JSON with: description, functionality, parameters, return_type
+   - **Example**:
+     ```
+     framework = extract_tool_info("search_web", code, "tools/search.py:search_web")
+     # Read framework["analysis_prompt"]
+     # Analyze the code yourself and return JSON result
+     ```
+
+7. **ROUND 2: extract_dataflow(tool_name, code_snippet, tool_description, position)**
+   - Requires: tool_description from Round 1
+   - Returns an analysis framework with `analysis_prompt`
+   - **YOU** analyze the data flow according to the prompt
+   - Return JSON with: data_sources, data_destinations, transformations, sensitive_flows
+   - **Example**:
+     ```
+     framework = extract_dataflow("search_web", code, tool_description, "tools/search.py:search_web")
+     # Read framework["analysis_prompt"]
+     # Analyze the data flow yourself and return JSON result
+     ```
+
+8. **ROUND 3: extract_vulnerabilities(tool_name, code_snippet, tool_description, dataflow, position)**
+   - Requires: tool_description from Round 1, dataflow from Round 2
+   - Returns an analysis framework with `analysis_prompt`
+   - **YOU** analyze vulnerabilities according to the prompt
+   - Return JSON with: vulnerabilities, injection_vectors, threat_model, overall_risk
+   - **Example**:
+     ```
+     framework = extract_vulnerabilities("search_web", code, tool_description, dataflow, "tools/search.py:search_web")
+     # Read framework["analysis_prompt"]
+     # Analyze vulnerabilities yourself and return JSON result
+     ```
+
+9. **save_tool_analysis(tool_name, tool_info, dataflow, vulnerabilities, position)**
+   - **CRITICAL: Call this IMMEDIATELY after completing 3 rounds of analysis**
+   - Saves the tool analysis to incremental JSON file
+   - tool_info: Result from extract_tool_info (Round 1)
+   - dataflow: Result from extract_dataflow (Round 2)
+   - vulnerabilities: Result from extract_vulnerabilities (Round 3)
+   - Returns: success, tools_count, json_path
+
+10. save_environment_info(docker_required=None, framework=None, dependencies=[], config_files=[], entry_points=[])
+    - Call when you discover environment information
+    - Updates incremental JSON with environment details
+    - Can be called multiple times as you discover more info
+
+11. log_analysis_event(event_type, details)
+    - Log key analysis events (tool_discovered, directory_explored, framework_identified)
+    - Helps track the analysis process
+
+12. get_incremental_analysis_summary()
+    - Check current progress: how many tools analyzed so far
+    - Returns: tools_count, analysis_status, json_path
+
+13. write_report(incremental_json_path=None, agent_name=None)
+    - **FINAL STEP: Call this ONCE at the very end** after analyzing ALL tools
+    - Reads incremental JSON and generates final comprehensive report
+    - Returns: success, final_report_path, summary
+
+**Progress Tracking (AUTO-TRACKING ENABLED):**
+
+9. todo_write(todos)
+   - **CRITICAL: Use this tool to track your analysis progress**
+   - Each todo needs: {{"content": "...", "status": "pending|in_progress|completed", "activeForm": "..."}}
+   - **NEW**: Add "tool_pattern" for auto-tracking (e.g., "read_code|search_code")
+   - When tool_pattern matches a tool call, todo auto-updates to in_progress/completed
+   - Example: {{"content": "Read config files", "tool_pattern": "read_code", "auto_track": true}}
+
+11. todo_update(todo_id, status)
+   - **NEW**: Update a single todo's status (incremental update)
+   - More efficient than rewriting entire todo list
+   - Use when you want to mark specific todos as completed
+
+12. todo_add(content, activeForm, tool_pattern=None, auto_track=True)
+   - **NEW**: Add a new todo without rewriting entire list
+   - Dynamically add tasks as you discover new work
+   - Supports auto-tracking with tool_pattern
+
+13. todo_complete(todo_id)
+   - **NEW**: Quick way to mark a todo as completed
+   - Convenience function for todo_update(todo_id, "completed")
+
+14. todo_read()
+   - Check current todo list and statistics
+
+=== ANALYSIS WORKFLOW ===
+
+Follow this iterative workflow:
+
+**Step 1: Initialize Session**
+- Call start_analysis_session(agent_name="target_agent_name")
+- Create initial todos using todo_write()
+
+**Step 2: Explore Environment**
+- Use list_directory(recursive=True) to see all files
+- Read entry points, requirements.txt, Dockerfile
+- Call save_environment_info() with framework, dependencies, entry_points, docker_required, config_files
+
+**Step 3: Discover Tools**
+Search for tools using multiple patterns:
+- search_code(pattern="def ", file_pattern="*.py")
+- search_code(pattern="@tool", file_pattern="*.py")
+- search_code(pattern="class ", file_pattern="*.py")
+- Read all files in directories like tools/, utils/, skills/
+
+Goal: Find at least 5-10 tools. Most agents have 10-20 tools.
+
+**Step 4: Analyze Each Tool**
+For each discovered tool:
+1. Read the tool code
+2. Call extract_tool_info(tool_name, code_snippet, position)
+3. Analyze the framework prompt and return JSON with tool info
+4. Call extract_dataflow(tool_name, code_snippet, tool_description, position)
+5. Analyze the framework prompt and return JSON with dataflow info
+6. Call extract_vulnerabilities(tool_name, code_snippet, tool_description, dataflow, position)
+7. Analyze the framework prompt and return JSON with vulnerability info
+8. Call save_tool_analysis(tool_name, tool_info, dataflow, vulnerabilities, position)
+9. Call get_incremental_analysis_summary() to check progress
+10. Continue to next tool
+
+Continue analyzing tools until you have analyzed at least 5 tools (preferably 10+).
+
+**Step 5: Generate Final Report**
+When all tools are analyzed:
+- Call write_report() to generate the final comprehensive security report
+- This creates FINAL_security_analysis_<agent>_<timestamp>.json
+
+Important notes:
+- Continue exploring until you've found and analyzed enough tools
+- After each save_tool_analysis(), check the tools_count
+- Keep working through your todo list
+- Do not stop until write_report() is called
+
+A. EXPLORE
+   - Work on the next pending todo from your list
+   - Read source files, search for patterns, trace imports
+   - When you discover new areas to investigate, immediately add them as new todos using todo_add()
+   - Continue exploring until you find tools, dataflows, or other interesting code patterns
+   - **Log discoveries**: Use log_analysis_event("tool_discovered", {{"tool_name": "..."}}) when you find a tool
+   - **SAVE ENVIRONMENT INFO EARLY**: When you read entry points, requirements.txt, or config files:
+     * Extract framework name (LangChain, AutoGPT, CrewAI, custom, etc.)
+     * Extract entry points (main.py, app.py, server.py, etc.)
+     * Extract dependencies from requirements.txt or pyproject.toml
+     * Check for Docker (Dockerfile, docker-compose.yml)
+     * Immediately call save_environment_info() with all discovered information
+     * This should happen in the FIRST few steps, not at the end!
+
+B. ANALYZE & RECORD INCREMENTALLY (when you discover a tool)
+   When you find a tool or function that the agent can use:
+
+   1. **SEQUENTIAL 3-ROUND ANALYSIS** - Use the three independent tools in order:
+
+      **ROUND 1: Extract Tool Info**
+      framework_1 = extract_tool_info(
+          tool_name="tool_name",
+          code_snippet="<actual implementation code>",
+          position="file.py:function_name"
+      )
+      # Read framework_1["analysis_prompt"]
+      # Analyze the code and produce JSON with: description, functionality, parameters, return_type
+      tool_info = {{ ... your analysis result in JSON ... }}
+
+      **ROUND 2: Extract Dataflow**
+      framework_2 = extract_dataflow(
+          tool_name="tool_name",
+          code_snippet="<same code>",
+          tool_description=tool_info["description"],  # From Round 1
+          position="file.py:function_name"
+      )
+      # Read framework_2["analysis_prompt"]
+      # Analyze data flow and produce JSON with: data_sources, data_destinations, transformations, sensitive_flows
+      dataflow = {{ ... your dataflow analysis in JSON ... }}
+
+      **ROUND 3: Extract Vulnerabilities**
+      framework_3 = extract_vulnerabilities(
+          tool_name="tool_name",
+          code_snippet="<same code>",
+          tool_description=tool_info["description"],  # From Round 1
+          dataflow=dataflow,  # From Round 2
+          position="file.py:function_name"
+      )
+      # Read framework_3["analysis_prompt"]
+      # Analyze vulnerabilities and produce JSON with: vulnerabilities, injection_vectors, threat_model, overall_risk
+      vulnerabilities = {{ ... your vulnerability analysis in JSON ... }}
+
+   2. **IMMEDIATELY SAVE TO INCREMENTAL JSON** - CRITICAL STEP:
+      result = save_tool_analysis(
+          tool_name="tool_name",
+          tool_info=tool_info,       # From Round 1
+          dataflow=dataflow,          # From Round 2
+          vulnerabilities=vulnerabilities,  # From Round 3
+          position="file.py:function_name"
+      )
+      # This automatically appends to the incremental JSON file
+      # You will see confirmation: "Successfully saved analysis for 'tool_name'. Total tools: N"
+
+   3. **IMMEDIATELY CHECK PROGRESS** - MANDATORY AFTER EACH SAVE:
+      summary = get_incremental_analysis_summary()
+      # Check: summary["tools_count"]
+      # If tools_count < 5: YOU MUST CONTINUE (no exceptions)
+      # If tools_count < 10: STRONGLY RECOMMENDED to continue
+      # DO NOT ASK USER - JUST CONTINUE AUTOMATICALLY
+
+   4. Mark the analysis todo as completed using todo_complete()
+
+   5. **IMMEDIATELY CONTINUE TO NEXT TOOL** - DO NOT STOP:
+      - Pick the next tool from your search results
+      - OR search for more tools if you've exhausted current list
+      - OR read more files to discover additional tools
+      - DO NOT write "next steps" or wait for confirmation
+      - JUST START ANALYZING THE NEXT TOOL IMMEDIATELY
+
+C. DYNAMIC TODO MANAGEMENT
+   - As you explore, continuously add new todos for:
+     - Files you need to read
+     - Imports you need to trace
+     - Patterns you need to search for
+     - Tools you need to analyze
+   - Use todo_add() to add new tasks organically as you discover them
+   - Use todo_complete() to mark tasks done
+   - Your todo list should grow and shrink naturally during exploration
+
+D. THOROUGHNESS PRINCIPLES [CRITICAL]
+
+   YOU MUST BE EXTREMELY THOROUGH. Many tools are missed because agents stop too early!
+
+   - Scan ALL source code files in the codebase:
+     * Use list_directory(recursive=True) to find ALL .py, .js, .ts, .go files
+     * Read EVERY file that could contain tools (all .py files, all .js/.ts files, etc.)
+     * Don't assume you've found everything after finding 2-3 tools - KEEP SEARCHING
+
+   - Follow ALL import chains:
+     * When you see an import, trace it and read that file too
+     * Use extract_imports() or read_code_with_references() to find dependencies
+     * Imports often lead to more tools
+
+   - Search for tools using MULTIPLE patterns (try ALL of these):
+     * "def.*tool" - function definitions with "tool" in name
+     * "@tool" - tool decorators
+     * "FunctionTool" - explicit tool wrappers
+     * "Tool(" - tool class instantiation (regex: Tool\\()
+     * "@function" - function decorators
+     * "def.*execute" - execution functions
+     * "def.*run" - run functions
+     * "def.*call" - call functions
+     * Class methods that wrap external capabilities
+     * API endpoint definitions (routes, handlers)
+
+   - Read entire key files:
+     * Entry points (main.py, app.py, __init__.py)
+     * Configuration files (config.py, settings.py)
+     * Tool/utility directories (tools/, utils/, skills/)
+     * Check environment files, Docker configurations
+
+   - NEVER stop early:
+     * Continue exploring until you've read ALL relevant files
+     * If you find 2-3 tools, there are likely 5-10 more - keep searching!
+     * Don't finish until your todo list is empty AND you've scanned the entire codebase
+     * Better to spend more turns being thorough than to miss important tools
+
+**STEP 3: Completion Criteria** [STRICT REQUIREMENTS]
+
+You should ONLY consider your analysis complete when ALL of these are true:
+- All todos in your list are marked as "completed"
+- You have used list_directory(recursive=True) to enumerate ALL files in the codebase
+- You have read EVERY .py/.js/.ts/.go file (or at least searched through them)
+- You have followed ALL import chains from main entry points
+- You have searched for tools using AT LEAST 5 different search patterns
+- get_incremental_analysis_summary() shows tools_count >= 5 (preferably 10+)
+  * If tools_count < 5, you MUST keep searching!
+- You have explored all directories named: tools/, utils/, skills/, functions/, commands/, agents/
+- You genuinely believe no more tools remain after extensive searching
+- You have called save_tool_analysis() for EACH discovered tool (after 3 rounds of analysis)
+- Each save_tool_analysis() call returned success=True
+
+DO NOT STOP EARLY! If you have any doubt, continue exploring. Missing tools is worse than taking more turns.
+
+**STEP 4: Generate Final Report** [MANDATORY FINAL STEP]
+
+🚨 YOU MUST CALL write_report() AT THE END! 🚨
+
+When ALL criteria above are met:
+1. Call get_incremental_analysis_summary() to verify tools_count >= 5
+2. **MANDATORY**: Call write_report() to generate the final comprehensive security report
+   - write_report() reads the incremental JSON file
+   - Generates a final formatted report with executive summary
+   - Returns final_report_path and summary
+3. **DO NOT SKIP THIS STEP** - The final report is required for the analysis to be complete
+
+The incremental JSON at reports/incremental_analysis_<agent_name>_<timestamp>.json contains all progressive updates.
+The final report at reports/FINAL_security_analysis_<agent_name>_<timestamp>.json is the REQUIRED comprehensive result.
+
+🚨 COMPLETION CHECKLIST (ALL MUST BE TRUE):
+✓ tools_count >= 5 (from get_incremental_analysis_summary())
+✓ All todos marked as completed
+✓ Environment info saved (framework, entry_points, dependencies)
+✓ write_report() called successfully
+✓ Final report path received and confirmed
+
+=== TOOL CATEGORIES ===
+
+When categorizing tools, use these types:
+- **file_execution**: Tools that read/write/execute files
+- **bash_command**: Tools that run shell commands
+- **web_browsing**: Tools that fetch web content
+- **report_generation**: Tools that generate reports/outputs
+- **database**: Tools that access databases
+- **api_call**: Tools that call external APIs
+- **other**: Other tool types
+
+=== GUIDELINES FOR EFFECTIVE ANALYSIS ===
+
+**Exploration Strategy:**
+- Start broad (directory structure, entry points) then go deep (specific files, functions)
+- Use list_directory(recursive=True) FIRST to get a complete file inventory
+- Systematically read all files in tool-related directories (tools/, utils/, skills/, etc.)
+- Follow the code: when you see an import, trace it; when you see a function call, investigate it
+- Use search patterns liberally: try AT LEAST 5-10 different search patterns
+- Read entire files when they seem important, not just snippets
+- Don't assume you've found everything - keep searching until:
+  * All search patterns return no new results
+  * All files in the codebase have been examined
+  * You've found 10+ tools or exhaustively confirmed there are fewer
+- If you only found 2-3 tools, you probably missed many - go back and search more thoroughly
+
+**Tool Discovery Tips:**
+- Look for function definitions that wrap external capabilities
+- Check for class methods that provide agent functionality
+- Search for decorators like @tool, @function_tool
+- Look for FunctionTool, Tool, or similar framework-specific wrappers
+- Examine how the agent is initialized - tools are usually registered there
+
+**Security Analysis Focus:**
+- Pay special attention to tools that execute code or commands
+- Identify tools that access files or network resources
+- Trace how user input flows through the system
+- Note any validation or sanitization (or lack thereof)
+- Consider the attack surface: what can an attacker control?
+
+**Quality Over Speed:**
+- Take your time to thoroughly explore the codebase
+- It's better to find all tools through careful analysis than to rush
+- Use incremental recording so you don't lose progress
+- Your todo list helps you stay organized - use it actively
+
+**Remember:**
+- You are building a security analysis through incremental documentation
+- Each tool you find is immediately recorded (no data loss)
+- Continue exploring until all todos are completed
+- Thoroughness is valued - don't rush to finish
+
+Begin by creating your initial todo list and start the exploration-analysis-recording cycle.
+"""
+        return prompt
+
+    def _build_adk_agent(self) -> LlmAgent:
+        """Build Google ADK agent with tools."""
+        model_name = os.getenv("ANALYSIS_AGENT_MODEL", "gpt-4")
+        api_key = os.getenv("OPENAI_API_KEY")
+        base_url = os.getenv("OPENAI_BASE_URL")
+
+        system_prompt = self._build_system_prompt()
+        llm = LiteLlm(model=model_name, api_key=api_key, base_url=base_url)
+
+        # Wrap functions as FunctionTools
+        tools = [
+            # Code reading tools (LOCAL filesystem - with cross-reference support)
+            FunctionTool(func=read_code),
+            FunctionTool(func=read_code_with_references),
+            FunctionTool(func=extract_imports),
+            FunctionTool(func=list_directory),
+            FunctionTool(func=search_code),
+            # Docker container tools
+            FunctionTool(func=execute_docker_command),
+            # Session management
+            FunctionTool(func=start_analysis_session),
+            FunctionTool(func=end_analysis_session),
+            # Tool Extractor (Sequential 3-round analysis framework)
+            FunctionTool(func=extract_tool_info),
+            FunctionTool(func=extract_dataflow),
+            FunctionTool(func=extract_vulnerabilities),
+            # Incremental analysis writer (CRITICAL - call after 3 rounds)
+            FunctionTool(func=save_tool_analysis),
+            FunctionTool(func=log_analysis_event),
+            FunctionTool(func=save_environment_info),
+            FunctionTool(func=get_incremental_analysis_summary),
+            # Report writing (FINAL - call at the end)
+            FunctionTool(func=write_report),
+            # Todo tracking tools (with auto-tracking support)
+            FunctionTool(func=todo_write),
+            FunctionTool(func=todo_read),
+            FunctionTool(func=todo_update),
+            FunctionTool(func=todo_add),
+            FunctionTool(func=todo_complete)
+        ]
+
+        agent = LlmAgent(
+            model=llm,
+            name="analysis_agent",
+            description="Code analysis agent for understanding agent architectures",
+            instruction=system_prompt,
+            tools=tools
+        )
+
+        logger.info(f"Analysis agent created with {len(tools)} tools")
+        return agent
+
+    def run(self, max_turns: int = 100, agent_name: str = None) -> dict:
+        """Run the analysis agent.
+
+        Args:
+            max_turns: Maximum number of LLM calls
+            agent_name: Name of the target agent being analyzed (for report generation)
+
+        Returns:
+            dict: Analysis results
+        """
+        from google.adk.runners import InMemoryRunner, RunConfig
+        from google.genai import types
+
+        logger.info(f"Starting analysis of {self.target_path}")
+
+        # Infer agent name from target path if not provided
+        if agent_name is None:
+            agent_name = os.path.basename(self.target_path.rstrip('/'))
+            logger.info(f"Inferred agent name: {agent_name}")
+
+        # Store agent name for report writing (will be accessible via tool_context)
+        self.agent_name = agent_name
+
+        # Create runner
+        runner = InMemoryRunner(agent=self.agent, app_name="analysis_agent")
+
+        # Create session
+        import asyncio
+        asyncio.run(
+            runner.session_service.create_session(
+                app_name="analysis_agent",
+                user_id="analyst",
+                session_id="default"
+            )
+        )
+
+        run_config = RunConfig(max_llm_calls=max_turns)
+
+        # Create user message
+        if self.container_name:
+            target_location = f"Docker container: {self.container_name}"
+            access_method = f"Use execute_docker_command(container_name='{self.container_name}', command='...') to access files"
+        else:
+            target_location = f"Local filesystem: {self.target_path}"
+            access_method = "Use read_code(), list_directory(), search_code() for local file access"
+
+        user_message = types.Content(
+            role="user",
+            parts=[
+                types.Part(
+                    text=f"""🚨 COMPREHENSIVE SECURITY ANALYSIS TASK 🚨
+
+TARGET: {target_location}
+AGENT NAME: {agent_name}
+ACCESS METHOD: {access_method}
+TURNS AVAILABLE: {max_turns}
+
+════════════════════════════════════════════════════════════════════
+
+📋 MANDATORY WORKFLOW - FOLLOW EXACTLY:
+
+STEP 1: START SESSION (MUST BE FIRST!)
+   → Call: start_analysis_session(agent_name="{agent_name}")
+   → This creates: reports/incremental_analysis_{agent_name}_<timestamp>.json
+   → All progress will be saved to this file incrementally
+
+STEP 2: INITIAL EXPLORATION & ENVIRONMENT INFO
+   → Use list_directory(recursive=True) to enumerate ALL files
+   → Read key files: main.py, app.py, requirements.txt, Dockerfile, config files
+   → Extract environment information and IMMEDIATELY save:
+     save_environment_info(
+         framework="detected_framework",  # e.g., "LangChain", "AutoGPT"
+         entry_points=["main.py", "app.py"],
+         docker_required=True/False,
+         dependencies=[...],
+         config_files=[...]
+     )
+
+STEP 3: DISCOVER ALL TOOLS (MINIMUM 5 REQUIRED!)
+   → Search using MULTIPLE patterns:
+     * search_code(pattern="def ", file_pattern="*.py")
+     * search_code(pattern="@tool", file_pattern="*.py")
+     * search_code(pattern="class ", file_pattern="*.py")
+     * search_code(pattern="Tool\\(", file_pattern="*.py")
+   → Read all files in: tools/, utils/, skills/, functions/ directories
+   → Follow ALL import chains
+   → Keep searching until you find at least 5 tools (target: 10-20)
+
+STEP 4: ANALYZE EACH TOOL (3-ROUND PROCESS)
+   For EACH discovered tool, execute these 3 rounds sequentially:
+
+   🔹 ROUND 1: Extract Tool Info
+   framework = extract_tool_info(
+       tool_name="tool_name",
+       code_snippet="<full tool code>",
+       position="file.py:function_name"
+   )
+   # Read framework["analysis_prompt"] and analyze the code
+   # Return JSON: {{"tool_name": "...", "description": "...", "functionality": "...", "parameters": [...], "return_type": "...", "return_description": "..."}}
+
+   🔹 ROUND 2: Extract Dataflow
+   framework = extract_dataflow(
+       tool_name="tool_name",
+       code_snippet="<same code>",
+       tool_description=<result_from_round_1>["description"],
+       position="file.py:function_name"
+   )
+   # Read framework["analysis_prompt"] and analyze data flow
+   # Return JSON: {{"data_sources": [...], "data_destinations": [...], "data_transformations": [...], "flow_description": "...", "sensitive_flows": [...]}}
+
+   🔹 ROUND 3: Extract Vulnerabilities
+   framework = extract_vulnerabilities(
+       tool_name="tool_name",
+       code_snippet="<same code>",
+       tool_description=<result_from_round_1>["description"],
+       dataflow=<result_from_round_2>,
+       position="file.py:function_name"
+   )
+   # Read framework["analysis_prompt"] and analyze vulnerabilities
+   # Return JSON: {{"has_vulnerabilities": bool, "vulnerabilities": [...], "injection_vectors": [...], "threat_model": [...], "overall_risk": "...", "risk_summary": "..."}}
+
+   🔹 IMMEDIATELY SAVE (MANDATORY!)
+   save_tool_analysis(
+       tool_name="tool_name",
+       tool_info=<result_from_round_1>,
+       dataflow=<result_from_round_2>,
+       vulnerabilities=<result_from_round_3>,
+       position="file.py:function_name"
+   )
+
+   🔹 CHECK PROGRESS (MANDATORY!)
+   summary = get_incremental_analysis_summary()
+   # If summary["tools_count"] < 5: CONTINUE SEARCHING IMMEDIATELY
+   # DO NOT STOP until tools_count >= 5!
+
+STEP 5: CONTINUE UNTIL COMPLETE
+   🚨 DO NOT STOP EARLY! Continue analyzing tools until:
+   ✓ tools_count >= 5 (from get_incremental_analysis_summary())
+   ✓ ALL directories explored (tools/, utils/, skills/, etc.)
+   ✓ ALL search patterns exhausted
+   ✓ ALL import chains followed
+   ✓ Environment info saved (framework, entry_points, dependencies)
+
+STEP 6: GENERATE FINAL REPORT (MANDATORY!)
+   → Call: write_report()
+   → This generates: reports/FINAL_security_analysis_{agent_name}_<timestamp>.json
+   → Contains: all_tools_discovered, environment, tools_with_security_issues
+   → 🚨 YOU MUST CALL THIS AT THE END!
+
+════════════════════════════════════════════════════════════════════
+
+🚨 CRITICAL RULES:
+1. After EVERY save_tool_analysis(), immediately call get_incremental_analysis_summary()
+2. If tools_count < 5, CONTINUE searching (no exceptions, no asking)
+3. DO NOT write "next steps" or "final thoughts" - JUST KEEP ANALYZING
+4. DO NOT stop until write_report() is called successfully
+5. Each tool MUST go through all 3 rounds + save_tool_analysis()
+
+🚫 ABSOLUTELY FORBIDDEN:
+- NEVER end your response with "I am now starting..." or "Next, I will..."
+- NEVER write a summary of what you plan to do
+- NEVER write a final response until write_report() is complete
+- If you find yourself writing "I am now", STOP and actually call the tool instead!
+- Action speaks louder than words - JUST CALL THE TOOLS!
+
+📊 SUCCESS CRITERIA (ALL MUST BE TRUE):
+✓ start_analysis_session() called
+✓ Environment info saved (framework, entry_points detected)
+✓ At least 5 tools analyzed (preferably 10+)
+✓ Each tool has 3 rounds of analysis + saved
+✓ write_report() called and final report generated
+
+⚡ IMMEDIATE ACTION REQUIRED:
+After searching for tools and finding matches (def, @tool, class, etc.):
+1. IMMEDIATELY read the code for the first tool
+2. IMMEDIATELY call extract_tool_info() with that code
+3. IMMEDIATELY continue with extract_dataflow() and extract_vulnerabilities()
+4. IMMEDIATELY call save_tool_analysis()
+5. IMMEDIATELY move to the next tool
+DO NOT WRITE TEXT - JUST DO IT!
+
+BEGIN ANALYSIS NOW - TAKE ACTION IMMEDIATELY!"""
+                )
+            ]
+        )
+
+        final_response = None
+        write_report_call_count = 0
+        security_report_path = None
+
+        analysis_data = {
+            "session_id": self.session_history["session_id"],
+            "target_path": self.target_path,
+            "container_name": self.container_name,
+            "events": [],
+            "final_response": None,
+            "write_report_call_count": 0,
+            "security_report_path": None
+        }
+
+        try:
+            logger.info("Starting agent execution...")
+            for event in runner.run(
+                user_id="analyst",
+                session_id="default",
+                new_message=user_message,
+                run_config=run_config
+            ):
+                # Log tool calls
+                function_calls = event.get_function_calls()
+                if function_calls:
+                    for fc in function_calls:
+                        # Extract arguments
+                        args = {}
+                        try:
+                            args = fc.args if hasattr(fc, 'args') else {}
+                            if isinstance(args, str):
+                                args = json.loads(args)
+                        except Exception as e:
+                            logger.warning(f"Failed to parse args for {fc.name}: {e}")
+
+                        # Create detailed log entry
+                        log_entry = {
+                            "type": "tool_call",
+                            "tool": fc.name,
+                            "timestamp": time.time(),
+                            "arguments": {}
+                        }
+
+                        # Extract key arguments based on tool type
+                        if fc.name == "list_directory":
+                            log_entry["arguments"]["dir_path"] = args.get("dir_path", "")
+                            log_entry["arguments"]["recursive"] = args.get("recursive", False)
+                            log_entry["arguments"]["pattern"] = args.get("pattern")
+                            logger.info(f"[Tool Call] list_directory(dir_path='{args.get('dir_path', '')}', recursive={args.get('recursive', False)})")
+                        elif fc.name == "read_code":
+                            log_entry["arguments"]["file_path"] = args.get("file_path", "")
+                            logger.info(f"[Tool Call] read_code(file_path='{args.get('file_path', '')}')")
+                        elif fc.name == "read_code_with_references":
+                            log_entry["arguments"]["file_path"] = args.get("file_path", "")
+                            logger.info(f"[Tool Call] read_code_with_references(file_path='{args.get('file_path', '')}')")
+                        elif fc.name == "search_code":
+                            log_entry["arguments"]["search_pattern"] = args.get("search_pattern", "")
+                            log_entry["arguments"]["search_path"] = args.get("search_path", "")
+                            log_entry["arguments"]["file_pattern"] = args.get("file_pattern")
+                            logger.info(f"[Tool Call] search_code(pattern='{args.get('search_pattern', '')}', path='{args.get('search_path', '')}')")
+                        elif fc.name in ["extract_tool_info", "extract_dataflow", "extract_vulnerabilities"]:
+                            log_entry["arguments"]["tool_name"] = args.get("tool_name", "")
+                            log_entry["arguments"]["position"] = args.get("position", "")
+                            logger.info(f"[Tool Call] {fc.name}(tool_name='{args.get('tool_name', '')}', position='{args.get('position', '')}')")
+                        elif fc.name == "save_tool_analysis":
+                            log_entry["arguments"]["tool_name"] = args.get("tool_name", "")
+                            log_entry["arguments"]["position"] = args.get("position", "")
+                            logger.info(f"[Tool Call] save_tool_analysis(tool_name='{args.get('tool_name', '')}', position='{args.get('position', '')}')")
+                        elif fc.name == "write_report":
+                            log_entry["arguments"]["agent_name"] = args.get("agent_name", "")
+                            log_entry["arguments"]["incremental"] = args.get("incremental", False)
+                            logger.info(f"[Tool Call] write_report(agent_name='{args.get('agent_name', '')}', incremental={args.get('incremental', False)})")
+                        else:
+                            logger.info(f"[Tool Call] {fc.name}")
+
+                        analysis_data["events"].append(log_entry)
+
+                        # Track write_report calls
+                        if fc.name == "write_report":
+                            write_report_call_count += 1
+                            logger.info(f"write_report tool called (call #{write_report_call_count})")
+
+                # Log tool responses
+                function_responses = event.get_function_responses()
+                if function_responses:
+                    for fr in function_responses:
+                        # Parse response for logging
+                        response_summary = None
+                        try:
+                            if isinstance(fr.response, str):
+                                response_data = json.loads(fr.response) if fr.response.startswith('{') else fr.response
+                            else:
+                                response_data = fr.response
+
+                            # Extract summary based on tool type
+                            if fr.name == "list_directory":
+                                if isinstance(response_data, dict):
+                                    file_count = len(response_data.get("files", []))
+                                    dir_count = len(response_data.get("directories", []))
+                                    response_summary = f"{file_count} files, {dir_count} directories"
+                            elif fr.name in ["read_code", "read_code_with_references"]:
+                                if isinstance(response_data, dict):
+                                    line_count = response_data.get("total_lines", 0)
+                                    response_summary = f"{line_count} lines"
+                            elif fr.name == "search_code":
+                                if isinstance(response_data, dict):
+                                    match_count = len(response_data.get("matches", []))
+                                    response_summary = f"{match_count} matches"
+                            elif fr.name == "save_tool_analysis":
+                                if isinstance(response_data, dict):
+                                    tools_count = response_data.get("tools_count", 0)
+                                    response_summary = f"tools_count: {tools_count}"
+                            elif fr.name == "get_incremental_analysis_summary":
+                                if isinstance(response_data, dict):
+                                    tools_count = response_data.get("tools_count", 0)
+                                    response_summary = f"tools_count: {tools_count}"
+                        except Exception as e:
+                            logger.debug(f"Failed to parse response for {fr.name}: {e}")
+
+                        log_entry = {
+                            "type": "tool_response",
+                            "tool": fr.name,
+                            "timestamp": time.time()
+                        }
+                        if response_summary:
+                            log_entry["response_summary"] = response_summary
+                            logger.info(f"[Tool Response] {fr.name} -> {response_summary}")
+                        else:
+                            logger.info(f"[Tool Response] {fr.name}")
+
+                        analysis_data["events"].append(log_entry)
+
+                        # Capture write_report result
+                        if fr.name == "write_report":
+                            try:
+                                # Parse response to get report path
+                                result = json.loads(fr.response) if isinstance(fr.response, str) else fr.response
+                                if result.get("success"):
+                                    security_report_path = result.get("report_path")
+                                    logger.info(f"Security report updated: {security_report_path}")
+                            except Exception as e:
+                                logger.warning(f"Failed to parse write_report response: {e}")
+
+                # Capture final response
+                if event.is_final_response():
+                    final_response = event.content.parts[0].text
+                    logger.info(f"[Final Response] {final_response[:200]}...")
+                    analysis_data["final_response"] = final_response
+
+            logger.info("Analysis completed")
+
+            # Update analysis data with report info
+            analysis_data["write_report_call_count"] = write_report_call_count
+            analysis_data["security_report_path"] = security_report_path
+
+            # Log write_report statistics
+            if write_report_call_count == 0:
+                logger.warning("No write_report calls made during analysis")
+            else:
+                logger.info(f"write_report called {write_report_call_count} times during analysis")
+                logger.info(f"Incremental report saved at: {security_report_path}")
+
+            # Save results if requested
+            self._save_results(analysis_data)
+
+            return analysis_data
+
+        except Exception as e:
+            logger.error(f"Analysis error: {e}", exc_info=True)
+            analysis_data["error"] = str(e)
+            return analysis_data
+
+    def _save_results(self, analysis_data: dict):
+        """Save analysis results to file."""
+        try:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            reports_dir = os.path.join(script_dir, "reports")
+            os.makedirs(reports_dir, exist_ok=True)
+
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            report_file = os.path.join(reports_dir, f"analysis_{timestamp}.json")
+
+            with open(report_file, 'w') as f:
+                json.dump(analysis_data, f, indent=2)
+
+            logger.info(f"Analysis results saved to {report_file}")
+
+        except Exception as e:
+            logger.error(f"Failed to save results: {e}")

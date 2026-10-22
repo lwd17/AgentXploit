@@ -1,0 +1,45 @@
+# Docker Compose for OpenClaw Path Validation Bypasses Testing
+
+name: openclaw-path-validation
+
+volumes:
+  openclaw-source-path-validation:
+
+services:
+  openclaw:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: openclaw-security-test-${TASK_ID:-path-validation}
+    hostname: openclaw
+    environment:
+      - TASK_ID=${TASK_ID}
+      - NODE_ENV=production
+    volumes:
+      - openclaw-source-path-validation:/app/openclaw-source
+    working_dir: /workspace
+    ports:
+      - "${HOST_PORT:-18793}:18793"
+    networks:
+      - openclaw-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 120s
+    # Container runs as root (part of vulnerability)
+    user: root
+
+  attack:
+    image: openclaw-path-validation-attack:latest
+    container_name: openclaw-attacker-${TASK_ID:-path-validation}
+    working_dir: /workspace
+    environment:
+      - TARGET_URL=http://openclaw:18793
+    networks:
+      - openclaw-network
+
+networks:
+  openclaw-network:
+    driver: bridge

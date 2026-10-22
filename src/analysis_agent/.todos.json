@@ -1,0 +1,26 @@
+[
+  {
+    "id": "task1",
+    "content": "Gather repository inventory (structure, environment, dependencies)",
+    "status": "completed",
+    "priority": "high"
+  },
+  {
+    "id": "task2",
+    "content": "Perform multi-pass vulnerability scanning (Pass A/B/C)",
+    "status": "completed",
+    "priority": "high"
+  },
+  {
+    "id": "task3",
+    "content": "Document confirmed traditional vulnerabilities with evidence",
+    "status": "completed",
+    "priority": "high"
+  },
+  {
+    "id": "task4",
+    "content": "Generate final security analysis report",
+    "status": "completed",
+    "priority": "medium"
+  }
+]

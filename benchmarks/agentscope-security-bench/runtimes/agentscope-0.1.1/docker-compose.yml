@@ -1,0 +1,43 @@
+# Docker Compose for AgentScope 0.1.1 Security Testing
+# CVE-2024-8438 (path traversal), CVE-2024-8501 (file download), CVE-2024-8524 (dir traversal),
+# CVE-2024-8537 (path traversal delete), CVE-2024-8550 (LFI workflow), CVE-2024-8551 (path traversal),
+# CVE-2024-8556 (stored XSS)
+#
+# Project name is unique per TASK_ID and optional RUN_ID.
+# Set RUN_ID to allow the same task to run concurrently:
+#   export RUN_ID=$(date +%s) && export TASK_ID=cve-2024-8438-path-traversal-api-file && docker compose up -d
+name: agentscope-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+
+services:
+  agentscope:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: agentscope-security-test-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+    command: sleep infinity
+    environment:
+      - TASK_ID=${TASK_ID}
+    working_dir: /app/agentscope-source
+    networks:
+      - exploit_net
+      - llm_net
+
+  attack:
+    build:
+      context: .
+      dockerfile: Dockerfile.attacker
+    container_name: agentscope-attacker-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+    working_dir: /workspace
+    environment:
+      - TARGET_URL=http://agentscope:5000
+      - TARGET_CONTAINER=agentscope-security-test-${TASK_ID:-default}${RUN_ID:+-${RUN_ID}}
+    networks:
+      - exploit_net
+
+networks:
+  # Internal network: attacker <-> target only, no internet access
+  exploit_net:
+    internal: true
+  # Non-internal: target needs this for LLM API calls
+  llm_net:
+    driver: bridge
